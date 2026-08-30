@@ -1,3 +1,4 @@
+// written by smruti sourav sahoo
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
@@ -7,72 +8,90 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// Serve static files from the current directory
 app.use(express.static(path.join(__dirname)));
 
-// WebSocket signaling server logic
-let operatorSocket = null;
-let candidateSocket = null;
+// Space Complexity: O(N) where N is the number of active rooms.
+// Using a Map provides O(1) time complexity for lookup, insertion, and deletion.
+const rooms = new Map(); 
 
 wss.on('connection', (ws) => {
     console.log('Client connected');
 
     ws.on('message', (messageAsString) => {
-        const message = JSON.parse(messageAsString);
+        let message;
+        // 1. Error Boundary: Prevent process crash on bad payload
+        try {
+            message = JSON.parse(messageAsString);
+        } catch (error) {
+            console.error('Dropped malformed message:', messageAsString);
+            return; 
+        }
 
-        switch (message.type) {
+        const { type, roomId, target } = message;
+
+        // Ensure room exists
+        if (!rooms.has(roomId)) {
+            rooms.set(roomId, { operator: null, candidate: null });
+        }
+        const room = rooms.get(roomId);
+
+        switch (type) {
             case 'register-operator':
-                operatorSocket = ws;
-                console.log('Operator registered');
-                if (candidateSocket) {
-                    operatorSocket.send(JSON.stringify({ type: 'candidate-waiting' }));
+                room.operator = ws;
+                // Attach roomId to the socket object for O(1) cleanup on disconnect
+                ws.roomId = roomId; 
+                ws.role = 'operator';
+                if (room.candidate) {
+                    room.operator.send(JSON.stringify({ type: 'candidate-waiting' }));
                 }
                 break;
 
             case 'register-candidate':
-                candidateSocket = ws;
-                console.log('Candidate registered');
-                // Notify operator if they are online
-                if (operatorSocket) {
-                    operatorSocket.send(JSON.stringify({ type: 'candidate-waiting' }));
+                room.candidate = ws;
+                ws.roomId = roomId;
+                ws.role = 'candidate';
+                if (room.operator) {
+                    room.operator.send(JSON.stringify({ type: 'candidate-waiting' }));
                 }
                 break;
 
             case 'offer':
             case 'answer':
             case 'ice-candidate':
-                // Relay messages between candidate and operator
-                if (message.target === 'operator' && operatorSocket) {
-                    operatorSocket.send(JSON.stringify(message));
-                } else if (message.target === 'candidate' && candidateSocket) {
-                    candidateSocket.send(JSON.stringify(message));
-                }
-                break;
-
-            case 'verify-candidate':
-                // Operator initiated verification, notify candidate
-                if (candidateSocket) {
-                    candidateSocket.send(JSON.stringify({ type: 'operator-ready' }));
+                // Route strictly within the isolated Room context
+                if (target === 'operator' && room.operator) {
+                    room.operator.send(JSON.stringify(message));
+                } else if (target === 'candidate' && room.candidate) {
+                    room.candidate.send(JSON.stringify(message));
                 }
                 break;
         }
     });
 
     ws.on('close', () => {
-        if (ws === operatorSocket) {
-            console.log('Operator disconnected');
-            operatorSocket = null;
-        } else if (ws === candidateSocket) {
-            console.log('Candidate disconnected');
-            candidateSocket = null;
-            if (operatorSocket) {
-                operatorSocket.send(JSON.stringify({ type: 'candidate-disconnected' }));
+        // 2. O(1) Cleanup based on properties attached during registration
+        if (!ws.roomId) return; 
+        
+        const room = rooms.get(ws.roomId);
+        if (!room) return;
+
+        if (ws.role === 'operator') {
+            room.operator = null;
+        } else if (ws.role === 'candidate') {
+            room.candidate = null;
+            if (room.operator) {
+                room.operator.send(JSON.stringify({ type: 'candidate-disconnected' }));
             }
+        }
+
+        // Garbage collection: If room is completely empty, delete it to free memory
+        if (!room.operator && !room.candidate) {
+            rooms.delete(ws.roomId);
         }
     });
 });
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
+    console.log(`Server is running on port ${PORT}`);
 });
